@@ -45,6 +45,7 @@ if __name__ == "__main__":
         logo_path="test_assets/test_logo.png",
         logo_position="Upper-Middle-Center",
         logo_opacity=0.5,
-        status_callback=status_cb
+        status_callback=status_cb,
+        progress_callback=lambda p: print(f"UI PROGRESS: {p}%")
     )
     print("Test finished successfully!")

@@ -56,10 +56,10 @@ def create_ken_burns_clip(image_path, target_w, target_h, duration, center_x, ce
     orig_aspect = orig_w / orig_h
     target_aspect = target_w / target_h
 
-    # --- STEP 1: CREATE THE GIGANTIC 3x OVERSAMPLED CANVAS ---
-    OVERSAMPLE_FACTOR = 3
-    huge_w = target_w * OVERSAMPLE_FACTOR
-    huge_h = target_h * OVERSAMPLE_FACTOR
+    # --- STEP 1: CREATE THE GIGANTIC 1.5x OVERSAMPLED CANVAS (Down from 3x for Speed) ---
+    OVERSAMPLE_FACTOR = 1.5
+    huge_w = int(target_w * OVERSAMPLE_FACTOR)
+    huge_h = int(target_h * OVERSAMPLE_FACTOR)
 
     # Fit original image into huge dimensions
     if orig_aspect > target_aspect:
@@ -79,15 +79,19 @@ def create_ken_burns_clip(image_path, target_w, target_h, duration, center_x, ce
         bg_w = huge_w
         bg_h = int(bg_w / orig_aspect)
 
-    bg_img = cv2.resize(img_bgr, (bg_w, bg_h), interpolation=cv2.INTER_LANCZOS4)
+    # Use INTER_LINEAR for background as it will be heavily blured anyway (much faster than LANCZOS4)
+    bg_img = cv2.resize(img_bgr, (bg_w, bg_h), interpolation=cv2.INTER_LINEAR)
     
     # Crop the overgrown background to exact huge target dimensions
     bg_x1 = (bg_w - huge_w) // 2
     bg_y1 = (bg_h - huge_h) // 2
     bg_cropped = bg_img[bg_y1:bg_y1+huge_h, bg_x1:bg_x1+huge_w]
 
-    # Apply heavy Gaussian blur to the huge background
-    bg_blurred = cv2.GaussianBlur(bg_cropped, (301, 301), 90)
+    # Fast Blur Hack: downscale 4x -> light blur -> upscale (avoids blurring full resolution)
+    small_h, small_w = huge_h // 4, huge_w // 4
+    bg_small = cv2.resize(bg_cropped, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+    bg_small_blurred = cv2.GaussianBlur(bg_small, (25, 25), 0)
+    bg_blurred = cv2.resize(bg_small_blurred, (huge_w, huge_h), interpolation=cv2.INTER_LINEAR)
 
     # Paste the properly scaled main image into the center
     paste_x = (huge_w - fit_w) // 2
@@ -133,12 +137,11 @@ def create_ken_burns_clip(image_path, target_w, target_h, duration, center_x, ce
         x1_f = current_cx - current_window_w / 2.0
         y1_f = current_cy - current_window_h / 2.0
         
-        # Cast to int (since it's a 3x huge canvas, a 1 unit integer rounding error 
-        # is 1/3rd of a pixel error in the final downscaled output, eliminating visible jitter)
-        x1 = int(round(x1_f))
-        y1 = int(round(y1_f))
-        w_int = int(round(current_window_w))
-        h_int = int(round(current_window_h))
+        # Cast to int (eliminates visible jitter)
+        x1 = int(x1_f)
+        y1 = int(y1_f)
+        w_int = int(current_window_w)
+        h_int = int(current_window_h)
         
         x2 = x1 + w_int
         y2 = y1 + h_int
@@ -161,6 +164,29 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
     Main function to process the images and audio into a final video.
     Supports a 4x3 grid / 5x5 grid logo, and automatic dynamic text headers generated with PIL.
     """
+    import proglog
+    
+    class StreamlitProgressLogger(proglog.ProgressBarLogger):
+        def __init__(self, ui_cb):
+            super().__init__()
+            self.ui_cb = ui_cb
+            self.last_percentage = -1
+
+        def bars_callback(self, bar, attr, value, old_value=None):
+            if attr == 'index' and self.ui_cb:
+                total = self.state.get('bars', {}).get(bar, {}).get('total', 1)
+                # MoviePy handles rendering at "50% to 100%" of our overall app bar.
+                # So we calculate rendering percentage (0-100) and scale it.
+                percentage = int((value / total) * 100)
+                
+                # Only update UI when percentage genuinely changes to prevent flooding Streamlit
+                if percentage != self.last_percentage:
+                    self.last_percentage = percentage
+                    # We map this 0-100 render progress to the 50-100 range of the main progress bar
+                    overall_percentage = 50 + int(percentage * 0.5)
+                    self.ui_cb(overall_percentage)
+                    
+    logger = StreamlitProgressLogger(progress_callback) if progress_callback else None
     target_w, target_h = 1080, 1920
     fps = 30
     crossfade_duration = 0.4
@@ -258,7 +284,11 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
                 bg_y1 = (fit_h - target_h) // 2
                 bg_cropped = bg_img[bg_y1:bg_y1+target_h, bg_x1:bg_x1+target_w]
                 
-                bg_blurred = cv2.GaussianBlur(bg_cropped, (151, 151), 50)
+                # Fast Blur Hack: downscale 4x -> light blur -> upscale
+                small_h, small_w = target_h // 4, target_w // 4
+                bg_small = cv2.resize(bg_cropped, (small_w, small_h), interpolation=cv2.INTER_LINEAR)
+                bg_small_blurred = cv2.GaussianBlur(bg_small, (25, 25), 0)
+                bg_blurred = cv2.resize(bg_small_blurred, (target_w, target_h), interpolation=cv2.INTER_LINEAR)
                 bg_blurred_rgb = cv2.cvtColor(bg_blurred, cv2.COLOR_BGR2RGB)
                 
                 bg_clip = ImageClip(bg_blurred_rgb).with_duration(v_clip.duration)
@@ -319,6 +349,9 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
             else:
                 final_video = final_video.with_audio(audio_clip.with_duration(final_video.duration))
 
+        # We will collect all final overlay layers here to flatten the MoviePy compositing tree
+        final_layers = [final_video]
+
         # --- WATERMARK LOGO INTEGRATION ---
         if logo_path and os.path.exists(logo_path):
             if status_callback: status_callback("Adding Watermark Logo...")
@@ -361,8 +394,8 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
             # Position logo and make it last the entire video duration
             logo_clip = logo_clip.with_position((x, y)).with_duration(final_video.duration)
         
-            # Composite it over the final video stream
-            final_video = CompositeVideoClip([final_video, logo_clip])
+            # Queue it for single-pass compositing
+            final_layers.append(logo_clip)
             clips.append(logo_clip) # Track to cleanup
 
         # --- DYNAMIC TEXT HEADER INTEGRATION ---
@@ -519,18 +552,23 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
                 else: hy = target_h - box_h - grid_margin
             
             header_clip = header_clip.with_position((hx, hy)).with_duration(final_video.duration)
-            final_video = CompositeVideoClip([final_video, header_clip])
+            final_layers.append(header_clip)
             clips.append(header_clip)
+            
+        # Composite all collected layers in a single pass
+        if len(final_layers) > 1:
+            final_video = CompositeVideoClip(final_layers)
     
         if status_callback: status_callback("Rendering Final Video (this may take a while)...")
-        # For progress indication during rendering: MoviePy uses progress_bar=True internally, but to pipe it to stream we might need a custom logger.
+        # Custom logger passes progress to Streamlit without freezing IO with terminal prints
         final_video.write_videofile(
             output_path, 
             fps=fps, 
             codec="libx264", 
             audio_codec="aac",
-            preset="ultrafast",  # Use ultrafast for quicker generation in the app
-            threads=4
+            preset="superfast",  # Balanced speed vs IO — better than ultrafast for disk-bound systems
+            threads=os.cpu_count(),
+            logger=logger
         )
         
     finally:
