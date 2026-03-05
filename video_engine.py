@@ -56,8 +56,8 @@ def create_ken_burns_clip(image_path, target_w, target_h, duration, center_x, ce
     orig_aspect = orig_w / orig_h
     target_aspect = target_w / target_h
 
-    # --- STEP 1: CREATE THE GIGANTIC 1.5x OVERSAMPLED CANVAS (Down from 3x for Speed) ---
-    OVERSAMPLE_FACTOR = 1.5
+    # --- STEP 1: CREATE THE GIGANTIC 3x OVERSAMPLED CANVAS ---
+    OVERSAMPLE_FACTOR = 3.0
     huge_w = int(target_w * OVERSAMPLE_FACTOR)
     huge_h = int(target_h * OVERSAMPLE_FACTOR)
 
@@ -159,7 +159,7 @@ def create_ken_burns_clip(image_path, target_w, target_h, duration, center_x, ce
     clip = VideoClip(make_frame, duration=duration)
     return clip
 
-def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None, logo_position="Bottom-Right", logo_opacity=0.8, header_text="", header_position="Freestyle", header_opacity=0.9, header_scale=1.0, video_bg_volume=0.15, progress_callback=None, status_callback=None):
+def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None, logo_position="Bottom-Right", logo_opacity=0.8, header_text="", header_position="Freestyle", header_opacity=0.9, header_scale=1.0, header_color="#FF6E00", video_bg_volume=0.15, progress_callback=None, status_callback=None):
     """
     Main function to process the images and audio into a final video.
     Supports a 4x3 grid / 5x5 grid logo, and automatic dynamic text headers generated with PIL.
@@ -468,8 +468,17 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
             
                 box_rect = [x_offset, current_y, x_offset + dim['bw'], current_y + dim['bh']]
             
+                from PIL import ImageColor
+                try:
+                    border_rgb = ImageColor.getrgb(header_color)
+                except ValueError:
+                    border_rgb = (255, 110, 0) # Fallback to orange
+                    
+                glow_rgb = border_rgb + (255,)
+                border_rgba_with_opacity = border_rgb + (int(255 * header_opacity),)
+
                 # Glow (Thicker outline drawn on blur layer)
-                glow_draw.rounded_rectangle(box_rect, radius=int(20 * header_scale), outline=(255, 110, 0, 255), width=int(20 * header_scale))
+                glow_draw.rounded_rectangle(box_rect, radius=int(20 * header_scale), outline=glow_rgb, width=int(20 * header_scale))
             
                 # Main Shape (Dark Charcoal Gradient)
                 box_w = dim['bw']
@@ -495,7 +504,7 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
                 shapes_layer.alpha_composite(grad_wrapper)
                 
                 shapes_draw = ImageDraw.Draw(shapes_layer)
-                shapes_draw.rounded_rectangle(box_rect, radius=int(20 * header_scale), outline=(255, 140, 0, int(255 * header_opacity)), width=max(1, int(4 * header_scale)))
+                shapes_draw.rounded_rectangle(box_rect, radius=int(20 * header_scale), outline=border_rgba_with_opacity, width=max(1, int(4 * header_scale)))
             
                 # Text
                 tx = x_offset + pad_x

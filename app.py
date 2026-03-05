@@ -55,7 +55,7 @@ def cleanup_temp_dir():
         shutil.rmtree(TEMP_DIR, ignore_errors=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
 
-def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_opacity, header_text, header_position, header_opacity, header_scale, video_bg_volume, progress_bar, status_text):
+def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_opacity, header_text, header_position, header_opacity, header_scale, header_color, video_bg_volume, progress_bar, status_text):
     from video_engine import process_video_pipeline
     
     # 1. Save uploaded files to temp
@@ -78,10 +78,13 @@ def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_o
         
     logo_path_str = None
     if uploaded_logo:
-        logo_path = TEMP_DIR / f"logo_{uploaded_logo.name}"
-        with open(logo_path, "wb") as f:
-            f.write(uploaded_logo.getbuffer())
-        logo_path_str = str(logo_path)
+        if isinstance(uploaded_logo, str):
+            logo_path_str = uploaded_logo
+        else:
+            logo_path = TEMP_DIR / f"logo_{uploaded_logo.name}"
+            with open(logo_path, "wb") as f:
+                f.write(uploaded_logo.getbuffer())
+            logo_path_str = str(logo_path)
         
     def progress_callback(percentage):
         # Maps 0-100 of process to 10-90 of total bar
@@ -102,6 +105,7 @@ def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_o
         header_position=header_position,
         header_opacity=header_opacity,
         header_scale=header_scale,
+        header_color=header_color,
         video_bg_volume=video_bg_volume,
         progress_callback=progress_callback,
         status_callback=status_callback
@@ -111,7 +115,7 @@ def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_o
     status_text.text("Done!")
 
 # Mockup function
-def render_unified_mockup(logo_file, logo_pos, logo_alpha, head_text, head_pos, head_alpha, head_scale):
+def render_unified_mockup(logo_file, logo_pos, logo_alpha, head_text, head_pos, head_alpha, head_scale, head_color):
     from PIL import Image, ImageDraw, ImageFont
     from PIL.Image import Resampling
     
@@ -124,9 +128,12 @@ def render_unified_mockup(logo_file, logo_pos, logo_alpha, head_text, head_pos, 
     
     if logo_file:
         try:
-            logo_file.seek(0)
-            logo_img = Image.open(logo_file).convert("RGBA")
-            logo_file.seek(0)
+            if isinstance(logo_file, str):
+                logo_img = Image.open(logo_file).convert("RGBA")
+            else:
+                logo_file.seek(0)
+                logo_img = Image.open(logo_file).convert("RGBA")
+                logo_file.seek(0)
         except Exception:
             logo_img = Image.new("RGBA", (135, 60), (255, 0, 0, 150))
     else:
@@ -228,7 +235,15 @@ def render_unified_mockup(logo_file, logo_pos, logo_alpha, head_text, head_pos, 
                 
             box_rect = [x_offset, current_y, x_offset + dim['bw'], current_y + dim['bh']]
             
-            glow_draw.rounded_rectangle(box_rect, radius=int(10 * head_scale), outline=(255, 110, 0, 255), width=int(10 * head_scale))
+            from PIL import ImageColor
+            try:
+                border_rgb = ImageColor.getrgb(head_color)
+            except ValueError:
+                border_rgb = (255, 110, 0)
+            glow_rgb = border_rgb + (255,)
+            border_rgba_with_opacity = border_rgb + (int(255 * head_alpha),)
+
+            glow_draw.rounded_rectangle(box_rect, radius=int(10 * head_scale), outline=glow_rgb, width=int(10 * head_scale))
             
             box_w = dim['bw']
             box_h = dim['bh']
@@ -253,7 +268,7 @@ def render_unified_mockup(logo_file, logo_pos, logo_alpha, head_text, head_pos, 
             shapes_layer.alpha_composite(grad_wrapper)
             
             shapes_draw = ImageDraw.Draw(shapes_layer)
-            shapes_draw.rounded_rectangle(box_rect, radius=int(10 * head_scale), outline=(255, 140, 0, int(255 * head_alpha)), width=max(1, int(2 * head_scale)))
+            shapes_draw.rounded_rectangle(box_rect, radius=int(10 * head_scale), outline=border_rgba_with_opacity, width=max(1, int(2 * head_scale)))
             
             tx = x_offset + pad_x
             ty = current_y + pad_y - 6
@@ -350,36 +365,51 @@ with col_left:
         video_bg_volume = st.slider("Background Video Volume", min_value=0.0, max_value=1.0, value=0.15, step=0.05)
 
     with st.expander("💧 Watermark Logo", expanded=False):
-        uploaded_logo = st.file_uploader(
-            "Upload Logo (PNG)", 
-            type=["png"], 
-            accept_multiple_files=False
+        watermark_option = st.radio(
+            "Watermark Source",
+            ["None", "Ciekawostki", "Info24", "Custom Upload"],
+            horizontal=True
         )
+        
+        uploaded_logo = None
+        if watermark_option == "Ciekawostki":
+            uploaded_logo = str(Path("assets/watermarks/watermark_ciekawostki.png").absolute())
+        elif watermark_option == "Info24":
+            uploaded_logo = str(Path("assets/watermarks/watermark_info24.png").absolute())
+        elif watermark_option == "Custom Upload":
+            uploaded_logo = st.file_uploader(
+                "Upload Logo (PNG)", 
+                type=["png"], 
+                accept_multiple_files=False
+            )
+
         st.write("Position Coordinates (X, Y):")
         col_lg_x, col_lg_y = st.columns(2)
         with col_lg_x:
-            logo_x = st.slider("X (px)", 0, 1080, 800, key="lx")
+            logo_x = st.slider("X (px)", 0, 1080, 700, key="lx")
         with col_lg_y:
-            logo_y = st.slider("Y (px)", 0, 1920, 1600, key="ly")
+            logo_y = st.slider("Y (px)", 0, 1920, 300, key="ly")
             
         logo_position = f"XY:{logo_x},{logo_y}"
-        logo_opacity = st.slider("Logo Opacity", min_value=0.0, max_value=1.0, value=0.8, step=0.05)
+        logo_opacity = st.slider("Logo Opacity", min_value=0.0, max_value=1.0, value=0.25, step=0.05)
 
     with st.expander("💬 Dynamic Header", expanded=True):
         header_text = st.text_area("Header Text (Enter = Newline)", value="IRÁNSKI ATAK RAKIETOWY\\nNA DUBAJ")
         
+        header_color = st.color_picker("Border Color", value="#FF6E00")
+        
         col_hd_op, col_hd_sc = st.columns(2)
         with col_hd_op:
-            header_opacity = st.slider("Opacity", min_value=0.0, max_value=1.0, value=0.9, step=0.05)
+            header_opacity = st.slider("Opacity", min_value=0.0, max_value=1.0, value=0.8, step=0.05)
         with col_hd_sc:
-            header_scale = st.slider("Scale (Size)", min_value=0.5, max_value=2.0, value=1.0, step=0.1)
+            header_scale = st.slider("Scale (Size)", min_value=0.5, max_value=2.0, value=0.7, step=0.1)
 
         st.write("Position Coordinates (X, Y):")
         col_hd_x, col_hd_y = st.columns(2)
         with col_hd_x:
-            header_x = st.slider("X (px) ", 0, 1080, 108, key="hx")
+            header_x = st.slider("X (px) ", 0, 1080, 65, key="hx")
         with col_hd_y:
-            header_y = st.slider("Y (px) ", 0, 1920, 200, key="hy")
+            header_y = st.slider("Y (px) ", 0, 1920, 1300, key="hy")
         final_header_position = f"XY:{header_x},{header_y}"
 
     st.markdown("### 🎬 Action")
@@ -396,7 +426,7 @@ with col_left:
                 generate_video(
                     ordered_images, uploaded_audio, uploaded_logo, logo_position,  
                     logo_opacity, header_text, final_header_position, header_opacity, 
-                    header_scale, video_bg_volume, progress_bar, status_text
+                    header_scale, header_color, video_bg_volume, progress_bar, status_text
                 )
                 
                 st.success("VIDEO GENERATED SUCCESSFULLY")
@@ -420,7 +450,7 @@ with col_right:
     
     preview_image = render_unified_mockup(
         uploaded_logo, logo_position, logo_opacity, 
-        header_text, final_header_position, header_opacity, header_scale
+        header_text, final_header_position, header_opacity, header_scale, header_color
     )
     st.image(preview_image, use_column_width=True)
 
