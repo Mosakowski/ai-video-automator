@@ -159,7 +159,299 @@ def create_ken_burns_clip(image_path, target_w, target_h, duration, center_x, ce
     clip = VideoClip(make_frame, duration=duration)
     return clip
 
-def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None, logo_position="Bottom-Right", logo_opacity=0.8, header_text="", header_position="Freestyle", header_opacity=0.9, header_scale=1.0, header_color="#FF6E00", video_bg_volume=0.15, progress_callback=None, status_callback=None):
+# --- EASING FUNCTIONS FOR ANIMATION ---
+def ease_out_cubic(t):
+    return 1 - pow(1 - t, 3)
+
+def ease_out_back(t, overshoot=1.70158):
+    return 1 + (overshoot + 1) * pow(t - 1, 3) + overshoot * pow(t - 1, 2)
+
+def make_animated_position(t, hx, hy, target_w, target_h, box_w, box_h, duration, anim_type):
+    """
+    Returns the (x, y) position of the header at time t, based on the animation type.
+    """
+    anim_duration = 1.0 # 1 second intro/outro
+    
+    def clamp(val, min_val, max_val):
+        return max(min_val, min(val, max_val))
+    
+    # INTRO
+    if t < anim_duration:
+        progress = t / anim_duration
+        
+        if anim_type == "1. Slide-in (Side)":
+            ease = ease_out_cubic(progress)
+            # Decide if left or right side based on final hx
+            if hx < target_w / 2:
+                start_x = -box_w - 50
+            else:
+                start_x = target_w + 50
+                
+            current_x = start_x + (hx - start_x) * ease
+            return (int(clamp(current_x, -box_w + 1, target_w - 1)), int(hy))
+            
+        elif anim_type == "2. Pop-up (Bottom)":
+            ease = ease_out_back(progress, overshoot=1.2)
+            start_y = target_h + 50
+            current_y = start_y + (hy - start_y) * ease
+            return (int(hx), int(clamp(current_y, -box_h + 1, target_h - 1)))
+            
+    # OUTRO
+    elif t > duration - anim_duration:
+        time_left = duration - t
+        progress = 1.0 - (time_left / anim_duration) # reverse progress 0 to 1
+        ease = ease_out_cubic(progress) # Using simpler cubic out reversed feels like cubic in
+        
+        if anim_type == "1. Slide-in (Side)":
+            if hx < target_w / 2:
+                end_x = -box_w - 50
+            else:
+                end_x = target_w + 50
+                
+            current_x = hx + (end_x - hx) * ease
+            return (int(clamp(current_x, -box_w + 1, target_w - 1)), int(hy))
+            
+        elif anim_type == "2. Pop-up (Bottom)":
+            end_y = target_h + 50
+            current_y = hy + (end_y - hy) * ease
+            return (int(hx), int(clamp(current_y, -box_h + 1, target_h - 1)))
+            
+    # STATIC
+    return (int(hx), int(hy))
+
+def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, style, header_position):
+    from PIL import Image, ImageFont, ImageDraw 
+    import cairosvg
+    import io
+
+    if not text.strip():
+        return Image.new('RGBA', (1,1), (0,0,0,0))
+    
+    lines = text.strip().split('\n')
+    
+    # Scale base metrics
+    pad_x = int(40 * scale)
+    pad_y = int(20 * scale)
+    line_spacing = int(-10 * scale)
+    font_size = int(75 * scale)
+    
+    # Text measurement using PIL 
+    try:
+        font = ImageFont.truetype("arialbd.ttf", font_size)
+    except IOError:
+        font = ImageFont.load_default()
+        
+    dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1,1)))
+    line_dims = []
+    total_w = 0
+    total_h = 0
+    
+    for line in lines:
+        if not line.strip():
+            tw, th = 0, font_size
+        else:
+            try:
+                left, top, right, bottom = dummy_draw.textbbox((0,0), line, font=font)
+                tw = right - left
+                th = bottom - top
+            except AttributeError:
+                tw = len(line) * int(35 * scale)
+                th = font_size
+            
+        tw = max(1, int(tw))
+        th = max(1, int(th))
+        box_w = tw + pad_x * 2 
+        box_h = th + pad_y * 2 
+        line_dims.append({'text': line, 'tw': tw, 'th': th, 'bw': box_w, 'bh': box_h})
+        
+        if box_w > total_w: total_w = box_w
+        total_h += box_h + line_spacing
+        
+    total_h -= line_spacing
+    
+    glow_radius = int(50 * scale)
+    canvas_w = int(max(1, total_w + glow_radius * 2))
+    canvas_h = int(max(1, total_h + glow_radius * 2))
+    
+    def hex_to_rgb_str(hex_val, alpha=1.0):
+        hex_val = hex_val.lstrip('#')
+        if len(hex_val) == 6:
+            r, g, b = tuple(int(hex_val[i:i+2], 16) for i in (0, 2, 4))
+        else:
+            r, g, b = 0, 0, 0
+        return f"rgba({r}, {g}, {b}, {alpha})"
+        
+    def hex_to_darker_rgb_str(hex_val, factor=0.2, alpha=1.0):
+        hex_val = hex_val.lstrip('#')
+        if len(hex_val) == 6:
+            r, g, b = tuple(int(int(hex_val[i:i+2], 16) * factor) for i in (0, 2, 4))
+        else:
+            r, g, b = 0, 0, 0
+        return f"rgba({r}, {g}, {b}, {alpha})"
+
+    # Start SVG document
+    svg = f'''<svg width="{canvas_w}" height="{canvas_h}" viewBox="0 0 {canvas_w} {canvas_h}" xmlns="http://www.w3.org/2000/svg">
+    <defs>
+    '''
+    
+    # Define Drop Shadows / Glows
+    glow_std_dev = int(6 * scale) if "1." in style else int(12 * scale)
+    svg += f'''
+        <filter id="neonGlow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="{glow_std_dev}" result="coloredBlur"/>
+            <feMerge>
+                <feMergeNode in="coloredBlur"/>
+                <feMergeNode in="coloredBlur"/> 
+                <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+        </filter>
+        <filter id="pillGlow" x="-50%" y="-50%" width="200%" height="200%">
+            <feGaussianBlur stdDeviation="{int(15 * scale)}" result="coloredBlur"/>
+            <feMerge>
+                <feMergeNode in="coloredBlur"/>
+                <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+        </filter>
+        <filter id="textShadow">
+            <feDropShadow dx="{max(1, int(3*scale))}" dy="{max(1, int(3*scale))}" stdDeviation="1" flood-color="rgba(0,0,0,{opacity})"/>
+        </filter>
+    '''
+
+    current_y = glow_radius
+    shapes_svg = ""
+    texts_svg = ""
+    glow_svg = ""
+    
+    for i, dim in enumerate(line_dims):
+        if "Left" in header_position:
+            x_offset = glow_radius
+        elif "Right" in header_position:
+            x_offset = glow_radius + (total_w - dim['bw'])
+        else: # Center
+            x_offset = glow_radius + (total_w - dim['bw']) // 2
+            
+        box_w, box_h = dim['bw'], dim['bh']
+        
+        if box_w <= 0 or box_h <= 0:
+            continue
+            
+        # Radius Rules
+        radius = int(20 * scale)
+        if "3." in style: # Floating Pill
+            radius = int(box_h / 2)
+        elif "4." in style or "5." in style: # Split Grid / Double Stroke
+            radius = int(8 * scale)
+            
+        # Define Gradient for this box
+        grad_id = f"grad{i}"
+        
+        if "2." in style:
+            stop1 = f"rgba(30, 30, 30, {0.7 * opacity})"
+            stop2 = f"rgba(10, 10, 10, {0.4 * opacity})"
+        elif "3." in style:
+            stop1 = f"rgba(26, 26, 26, {opacity})"
+            stop2 = f"rgba(26, 26, 26, {opacity})"
+        elif "4." in style:
+            stop1 = f"rgba(45, 45, 45, {opacity})"
+            stop2 = f"rgba(20, 20, 20, {0.78 * opacity})"
+        else:
+            is_top_bar = (i == 0) and (len(line_dims) > 1)
+            if is_top_bar:
+                stop1 = hex_to_rgb_str(bg_color_hex, opacity)
+                stop2 = hex_to_rgb_str(bg_color_hex, opacity)
+            else:
+                stop1 = hex_to_rgb_str(bg_color_hex, opacity)
+                stop2 = hex_to_darker_rgb_str(bg_color_hex, 0.2, opacity)
+
+        svg += f'''
+        <linearGradient id="{grad_id}" x1="0%" y1="0%" x2="0%" y2="100%">
+            <stop offset="0%" stop-color="{stop1}" />
+            <stop offset="100%" stop-color="{stop2}" />
+        </linearGradient>
+        '''
+        
+        # Build Shapes
+        border_color_full = hex_to_rgb_str(color_hex, 1.0)
+        border_color_op = hex_to_rgb_str(color_hex, opacity)
+        
+        # Box Background Fill
+        shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="url(#{grad_id})" />\n'
+        
+        if "1." in style: # Neon Edge
+            glow_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="{border_color_full}" stroke-width="{int(12 * scale)}" filter="url(#neonGlow)" />\n'
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="{border_color_op}" stroke-width="{max(1, int(4 * scale))}" />\n'
+            
+        elif "2." in style: # Glassmorphic Ribbon
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="rgba(255,255,255,{0.4*opacity})" stroke-width="{max(1, int(2*scale))}" />\n'
+            shapes_svg += f'<rect x="{x_offset+2}" y="{current_y+2}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="{border_color_op}" stroke-width="{max(1, int(4*scale))}" />\n'
+            
+        elif "3." in style: # Floating Pill
+            # Add custom gradient specifically for the border
+            pill_stroke_grad_id = f"pillStrokeGrad{i}"
+            # We transition from the selected hex color to a vibrant complementary offset, or simply a bright to slightly darker version. 
+            # Let's make a beautiful transition using the base border color and a lighter version of it.
+            stroke_stop1 = border_color_op
+            
+            # Extract hex to generate a bright vibrant secondary color (e.g. shift hue/lightness). 
+            # We'll shift it towards a nice warmer/brighter tone. For simplicity, we just use a lighter alpha or different shade.
+            # We can use the hex_to_rgb_str with a lowered alpha for a fade, or just a hardcoded pink/orange vibe.
+            # Let's use a sunset-style gradient: Base Color -> White or Pinkish
+            # We'll use a semi-transparent version of the main color to a whiteish glow.
+            stroke_stop2 = f"rgba(255, 255, 255, {opacity})"
+            
+            svg += f'''
+            <linearGradient id="{pill_stroke_grad_id}" x1="0%" y1="0%" x2="100%" y2="100%">
+                <stop offset="0%" stop-color="{stroke_stop1}" />
+                <stop offset="50%" stop-color="{stroke_stop2}" />
+                <stop offset="100%" stop-color="{stroke_stop1}" />
+            </linearGradient>
+            '''
+            
+            glow_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="{border_color_full}" stroke-width="{int(18 * scale)}" filter="url(#pillGlow)" />\n'
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="url(#{pill_stroke_grad_id})" stroke-width="{max(1, int(4 * scale))}" />\n'
+            
+        elif "4." in style: # Split Grid
+            bar_w = int(14 * scale)
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{bar_w}" height="{box_h}" rx="{max(1, int(radius/2))}" ry="{max(1, int(radius/2))}" fill="{border_color_op}" />\n'
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="{border_color_op}" stroke-width="{max(1, int(2 * scale))}" />\n'
+            
+        elif "5." in style: # Double Stroke
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="rgba(255,255,255,{0.8*opacity})" stroke-width="{max(1, int(1.5*scale))}" />\n'
+            outer_gap = int(6 * scale)
+            r_out = radius + max(1, int(outer_gap/2))
+            shapes_svg += f'<rect x="{x_offset-outer_gap}" y="{current_y-outer_gap}" width="{box_w+(outer_gap*2)}" height="{box_h+(outer_gap*2)}" rx="{r_out}" ry="{r_out}" fill="none" stroke="{border_color_op}" stroke-width="{max(1, int(4*scale))}" />\n'
+            
+        # Text
+        tx = x_offset + pad_x
+        # Using exact center of box layout with dominant-baseline for SVG
+        ty = current_y + (box_h / 2)
+        if "4." in style: 
+            tx += int(20 * scale)
+            
+        text_color = f"rgba(255, 255, 255, {opacity})"
+        texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="bold" font-size="{font_size}px" fill="{text_color}" dominant-baseline="central" filter="url(#textShadow)">{dim["text"]}</text>\n'
+        
+        current_y += box_h + line_spacing
+
+    svg += "</defs>\n"
+    
+    # Layering
+    if "1." in style or "3." in style:
+        svg += f"<g id='glowLayer'>{glow_svg}</g>\n"
+        
+    svg += f"<g id='shapesLayer'>{shapes_svg}</g>\n"
+    svg += f"<g id='textsLayer'>{texts_svg}</g>\n"
+    svg += "</svg>"
+
+    try:
+        png_data = cairosvg.svg2png(bytestring=svg.encode('utf-8'))
+        return Image.open(io.BytesIO(png_data))
+    except Exception as e:
+        print(f"CairoSVG Render Error: {e}")
+        # Fallback to empty image on error
+        return Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
+
+def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None, logo_position="Bottom-Right", logo_opacity=0.8, header_text="", header_position="Freestyle", header_opacity=0.9, header_scale=1.0, header_color="#FF6E00", header_bg_color="#000000", header_style="1. Neon Edge", header_animation="None", video_bg_volume=0.15, progress_callback=None, status_callback=None):
     """
     Main function to process the images and audio into a final video.
     Supports a 4x3 grid / 5x5 grid logo, and automatic dynamic text headers generated with PIL.
@@ -401,137 +693,24 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
         # --- DYNAMIC TEXT HEADER INTEGRATION ---
         if header_text.strip():
             if status_callback: status_callback("Generating Dynamic Header...")
-            from PIL import Image, ImageDraw, ImageFont, ImageFilter
-        
-            # 1. Generate Header Plate (TikTok Pill Style)
-            lines = header_text.strip().split('\n')
-        
-            # For a 1080x1920 video, use larger font and paddings
-            pad_x = int(40 * header_scale)
-            pad_y = int(20 * header_scale)
-            line_spacing = int(-10 * header_scale) # Negative spacing to bunch them up like in the reference
-        
-            try:
-                # On Windows, arialbd.ttf is Arial Bold
-                font = ImageFont.truetype("arialbd.ttf", int(75 * header_scale))
-            except IOError:
-                font = ImageFont.load_default()
-
-            # Calculate dimensions
-            dummy_draw = ImageDraw.Draw(Image.new('RGBA', (1,1)))
-            line_dims = []
-            total_w = 0
-            total_h = 0
-        
-            for line in lines:
-                try:
-                    left, top, right, bottom = dummy_draw.textbbox((0,0), line, font=font)
-                    tw = right - left
-                    th = bottom - top
-                except AttributeError:
-                    tw = len(line) * 35 # rough approx
-                    th = 75
-                
-                box_w = tw + pad_x * 2
-                box_h = th + pad_y * 2
-                line_dims.append({'text': line, 'tw': tw, 'th': th, 'bw': box_w, 'bh': box_h})
             
-                if box_w > total_w: total_w = box_w
-                total_h += box_h + line_spacing
+            # 1. Generate Header Plate leveraging our new styling function
+            header_img = generate_dynamic_header_img(
+                header_text, header_scale, header_color, header_bg_color,
+                header_opacity, header_style, header_position
+            )
             
-            total_h -= line_spacing # remove last spacing
-        
-            # Add padding for glow effect
-            glow_radius = int(25 * header_scale)
-            canvas_w = total_w + glow_radius * 2
-            canvas_h = total_h + glow_radius * 2
-        
-            header_img = Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
-            glow_layer = Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
-            shapes_layer = Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
-            text_layer = Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
-        
-            glow_draw = ImageDraw.Draw(glow_layer)
-            shapes_draw = ImageDraw.Draw(shapes_layer)
-            text_draw = ImageDraw.Draw(text_layer)
-        
-            current_y = glow_radius
-        
-            for dim in line_dims:
-                # Align boxes based on position string
-                if "Left" in header_position:
-                    x_offset = glow_radius
-                elif "Right" in header_position:
-                    x_offset = glow_radius + (total_w - dim['bw'])
-                else: # Center
-                    x_offset = glow_radius + (total_w - dim['bw']) // 2
-            
-                box_rect = [x_offset, current_y, x_offset + dim['bw'], current_y + dim['bh']]
-            
-                from PIL import ImageColor
-                try:
-                    border_rgb = ImageColor.getrgb(header_color)
-                except ValueError:
-                    border_rgb = (255, 110, 0) # Fallback to orange
-                    
-                glow_rgb = border_rgb + (255,)
-                border_rgba_with_opacity = border_rgb + (int(255 * header_opacity),)
-
-                # Glow (Thicker outline drawn on blur layer)
-                glow_draw.rounded_rectangle(box_rect, radius=int(20 * header_scale), outline=glow_rgb, width=int(20 * header_scale))
-            
-                # Main Shape (Dark Charcoal Gradient)
-                box_w = dim['bw']
-                box_h = dim['bh']
-                grad_img = Image.new('RGBA', (box_w, box_h))
-                grad_draw = ImageDraw.Draw(grad_img)
-                color_top = (55, 55, 55, int(255 * header_opacity))
-                color_bottom = (15, 15, 15, int(255 * header_opacity))
-                for y in range(box_h):
-                    ratio = y / float(box_h)
-                    r = int(color_top[0] * (1 - ratio) + color_bottom[0] * ratio)
-                    g = int(color_top[1] * (1 - ratio) + color_bottom[1] * ratio)
-                    b = int(color_top[2] * (1 - ratio) + color_bottom[2] * ratio)
-                    a = int(color_top[3] * (1 - ratio) + color_bottom[3] * ratio)
-                    grad_draw.line([(0, y), (box_w, y)], fill=(r, g, b, a))
-                
-                mask = Image.new('L', (box_w, box_h), 0)
-                mask_draw = ImageDraw.Draw(mask)
-                mask_draw.rounded_rectangle([0, 0, box_w, box_h], radius=int(20 * header_scale), fill=255)
-                
-                grad_wrapper = Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
-                grad_wrapper.paste(grad_img, (x_offset, current_y), mask)
-                shapes_layer.alpha_composite(grad_wrapper)
-                
-                shapes_draw = ImageDraw.Draw(shapes_layer)
-                shapes_draw.rounded_rectangle(box_rect, radius=int(20 * header_scale), outline=border_rgba_with_opacity, width=max(1, int(4 * header_scale)))
-            
-                # Text
-                tx = x_offset + pad_x
-                ty = current_y + pad_y - int(12 * header_scale) # vertical tweak for Arial bounds offset
-            
-                # Subtle drop shadow
-                shadow_off = max(1, int(3 * header_scale))
-                text_draw.text((tx+shadow_off, ty+shadow_off), dim['text'], fill=(0, 0, 0, int(200 * header_opacity)), font=font)
-                # Main Text
-                text_draw.text((tx, ty), dim['text'], fill=(255, 255, 255, int(255 * header_opacity)), font=font)
-            
-                current_y += dim['bh'] + line_spacing
-            
-            # Apply Blur to glow layer
-            glow_layer = glow_layer.filter(ImageFilter.GaussianBlur(glow_radius // 2))
-        
-            # Composite layers with double glow
-            header_img.alpha_composite(glow_layer)
-            header_img.alpha_composite(glow_layer) # Extra glow pass
-            header_img.alpha_composite(shapes_layer)
-            header_img.alpha_composite(text_layer)
+            canvas_w, canvas_h = header_img.size
             
             header_np = np.array(header_img)
             header_clip = ImageClip(header_np)
         
             # 2. Position Header
             # Decode position
+            
+            # box size used for grid logic AND animation
+            box_w, box_h = canvas_w, canvas_h
+            
             if header_position.startswith("XY:"):
                 # Freestyle Canvas Position
                 coords = header_position.replace("XY:", "").split(",")
@@ -540,9 +719,6 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
                 # 3x3 Grid Mode
                 hx, hy = 0, 0
                 grid_margin = 60
-            
-                # box size used for grid logic
-                box_w, box_h = canvas_w, canvas_h
             
                 if "Left" in header_position:
                     if "Center-" in header_position: hx = int(target_w * 0.25) - (box_w // 2)
@@ -560,7 +736,16 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
                 elif "Lower-Middle" in header_position: hy = int(target_h * 0.75) - (box_h // 2)
                 else: hy = target_h - box_h - grid_margin
             
-            header_clip = header_clip.with_position((hx, hy)).with_duration(final_video.duration)
+            # Evaluate header animation
+            if header_animation != "None":
+                def pos_func(t):
+                    return make_animated_position(
+                        t, hx, hy, target_w, target_h, box_w, box_h, final_video.duration, header_animation
+                    )
+                header_clip = header_clip.with_position(pos_func).with_duration(final_video.duration)
+            else:
+                header_clip = header_clip.with_position((hx, hy)).with_duration(final_video.duration)
+            
             final_layers.append(header_clip)
             clips.append(header_clip)
             
