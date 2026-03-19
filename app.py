@@ -356,8 +356,8 @@ with col_left:
                 "1. Neon Edge", 
                 "2. Glassmorphic Ribbon", 
                 "3. The Floating Pill", 
-                "4. Split-Grid Panel", 
-                "5. Double Stroke Outline"
+                "4. Single News Banner", 
+                "5. Multi-line News Banner"
             ], index=0)
         with col_hd_anim:
             header_animation = st.selectbox("Intro/Outro Animation", [

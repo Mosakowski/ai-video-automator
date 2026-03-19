@@ -269,6 +269,11 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
         
     total_h -= line_spacing
     
+    if "4." in style:
+        # Single News Banner dimensions
+        total_w += int(140 * scale)
+        total_h += int(20 * scale)
+        
     glow_radius = int(50 * scale)
     canvas_w = int(max(1, total_w + glow_radius * 2))
     canvas_h = int(max(1, total_h + glow_radius * 2))
@@ -322,6 +327,34 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
     texts_svg = ""
     glow_svg = ""
     
+    border_color_full = hex_to_rgb_str(color_hex, 1.0)
+    border_color_op = hex_to_rgb_str(color_hex, opacity)
+
+    if "4." in style: # Single News Banner (Global Background)
+        single_box_w = total_w
+        single_box_h = total_h
+        
+        # We always start at glow_radius, canvas width adjusts automatically
+        single_x = glow_radius
+            
+        # Base White Background
+        shapes_svg += f'<rect x="{single_x}" y="{current_y}" width="{single_box_w}" height="{single_box_h}" fill="rgba(250, 250, 250, {opacity})" />\n'
+        
+        # Top Accent Bar
+        top_bar_h = int(14 * scale)
+        yellow_w = int(single_box_w * 0.22)
+        main_w = single_box_w - yellow_w
+        
+        shapes_svg += f'<rect x="{single_x}" y="{current_y}" width="{yellow_w}" height="{top_bar_h}" fill="rgba(255, 232, 0, {opacity})" />\n'
+        shapes_svg += f'<rect x="{single_x + yellow_w}" y="{current_y}" width="{main_w}" height="{top_bar_h}" fill="{border_color_op}" />\n'
+
+        # Bottom shadow line
+        bottom_border_h = max(2, int(4 * scale))
+        shapes_svg += f'<rect x="{single_x}" y="{current_y + single_box_h - bottom_border_h}" width="{single_box_w}" height="{bottom_border_h}" fill="rgba(0, 0, 0, {0.3 * opacity})" />\n'
+
+        # Push the starting Y for text down a bit to account for the top bar and overall padding
+        current_y += int(10 * scale)
+
     for i, dim in enumerate(line_dims):
         if "Left" in header_position:
             x_offset = glow_radius
@@ -335,47 +368,43 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
         if box_w <= 0 or box_h <= 0:
             continue
             
-        # Radius Rules
-        radius = int(20 * scale)
-        if "3." in style: # Floating Pill
-            radius = int(box_h / 2)
-        elif "4." in style or "5." in style: # Split Grid / Double Stroke
-            radius = int(8 * scale)
-            
-        # Define Gradient for this box
-        grad_id = f"grad{i}"
-        
-        if "2." in style:
-            stop1 = f"rgba(30, 30, 30, {0.7 * opacity})"
-            stop2 = f"rgba(10, 10, 10, {0.4 * opacity})"
-        elif "3." in style:
-            stop1 = f"rgba(26, 26, 26, {opacity})"
-            stop2 = f"rgba(26, 26, 26, {opacity})"
-        elif "4." in style:
-            stop1 = f"rgba(45, 45, 45, {opacity})"
-            stop2 = f"rgba(20, 20, 20, {0.78 * opacity})"
-        else:
-            is_top_bar = (i == 0) and (len(line_dims) > 1)
-            if is_top_bar:
-                stop1 = hex_to_rgb_str(bg_color_hex, opacity)
-                stop2 = hex_to_rgb_str(bg_color_hex, opacity)
-            else:
-                stop1 = hex_to_rgb_str(bg_color_hex, opacity)
-                stop2 = hex_to_darker_rgb_str(bg_color_hex, 0.2, opacity)
+        # Draw text only for Style 4 (It has global box)
+        if "4." in style: 
+            # Center text within the single box
+            tx = glow_radius + (total_w / 2) if "Center" in header_position else glow_radius + pad_x + int(20 * scale)
+            ty = current_y + (box_h / 2) + int(6 * scale) 
+            text_color = f"rgba(16, 16, 16, {opacity})"
+            anchor = 'text-anchor="middle"' if "Center" in header_position else ''
+            texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="900" font-size="{font_size}px" fill="{text_color}" {anchor} dominant-baseline="central">{dim["text"]}</text>\n'
+            current_y += box_h + line_spacing
+            continue
 
-        svg += f'''
-        <linearGradient id="{grad_id}" x1="0%" y1="0%" x2="0%" y2="100%">
-            <stop offset="0%" stop-color="{stop1}" />
-            <stop offset="100%" stop-color="{stop2}" />
-        </linearGradient>
-        '''
+        # --------- SHAPE GENERATION FOR STYLES 1, 2, 3, 5 ---------
         
-        # Build Shapes
-        border_color_full = hex_to_rgb_str(color_hex, 1.0)
-        border_color_op = hex_to_rgb_str(color_hex, opacity)
+        # Adjust dimensions for specific styles
+        if "5." in style: # Multi-line News Banner
+            box_w = int(box_w + 140 * scale)
+            box_h = int(box_h + 10 * scale)
+            x_offset = int((canvas_w - box_w) / 2) if "Center" in header_position else glow_radius - int(30*scale)
+            x_offset = max(10, x_offset)
+            
+        radius = int(14 * scale)
+        if "3." in style: radius = int(box_h / 2)
+        if "5." in style: radius = 0
+            
+        # Base gradients
+        grad_id = f"bgGrad{i}"
         
-        # Box Background Fill
-        shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="url(#{grad_id})" />\n'
+        if "1." in style or "2." in style or "3." in style:
+            svg += f'''
+            <linearGradient id="{grad_id}" x1="0%" y1="0%" x2="0%" y2="100%">
+                <stop offset="0%" stop-color="{hex_to_rgb_str(bg_color_hex, opacity)}" />
+                <stop offset="100%" stop-color="{hex_to_darker_rgb_str(bg_color_hex, 0.4, opacity)}" />
+            </linearGradient>
+            '''
+            
+        if "5." not in style:
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="url(#{grad_id})" />\n'
         
         if "1." in style: # Neon Edge
             glow_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="{border_color_full}" stroke-width="{int(12 * scale)}" filter="url(#neonGlow)" />\n'
@@ -386,17 +415,8 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
             shapes_svg += f'<rect x="{x_offset+2}" y="{current_y+2}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="{border_color_op}" stroke-width="{max(1, int(4*scale))}" />\n'
             
         elif "3." in style: # Floating Pill
-            # Add custom gradient specifically for the border
             pill_stroke_grad_id = f"pillStrokeGrad{i}"
-            # We transition from the selected hex color to a vibrant complementary offset, or simply a bright to slightly darker version. 
-            # Let's make a beautiful transition using the base border color and a lighter version of it.
             stroke_stop1 = border_color_op
-            
-            # Extract hex to generate a bright vibrant secondary color (e.g. shift hue/lightness). 
-            # We'll shift it towards a nice warmer/brighter tone. For simplicity, we just use a lighter alpha or different shade.
-            # We can use the hex_to_rgb_str with a lowered alpha for a fade, or just a hardcoded pink/orange vibe.
-            # Let's use a sunset-style gradient: Base Color -> White or Pinkish
-            # We'll use a semi-transparent version of the main color to a whiteish glow.
             stroke_stop2 = f"rgba(255, 255, 255, {opacity})"
             
             svg += f'''
@@ -410,26 +430,36 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
             glow_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="{border_color_full}" stroke-width="{int(18 * scale)}" filter="url(#pillGlow)" />\n'
             shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="url(#{pill_stroke_grad_id})" stroke-width="{max(1, int(4 * scale))}" />\n'
             
-        elif "4." in style: # Split Grid
-            bar_w = int(14 * scale)
-            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{bar_w}" height="{box_h}" rx="{max(1, int(radius/2))}" ry="{max(1, int(radius/2))}" fill="{border_color_op}" />\n'
-            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="{border_color_op}" stroke-width="{max(1, int(2 * scale))}" />\n'
+        elif "5." in style: # Multi-line News Banner
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" fill="rgba(250, 250, 250, {opacity})" />\n'
             
-        elif "5." in style: # Double Stroke
-            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="none" stroke="rgba(255,255,255,{0.8*opacity})" stroke-width="{max(1, int(1.5*scale))}" />\n'
-            outer_gap = int(6 * scale)
-            r_out = radius + max(1, int(outer_gap/2))
-            shapes_svg += f'<rect x="{x_offset-outer_gap}" y="{current_y-outer_gap}" width="{box_w+(outer_gap*2)}" height="{box_h+(outer_gap*2)}" rx="{r_out}" ry="{r_out}" fill="none" stroke="{border_color_op}" stroke-width="{max(1, int(4*scale))}" />\n'
+            top_bar_h = int(14 * scale)
+            yellow_w = int(box_w * 0.22)
+            main_w = box_w - yellow_w
             
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{yellow_w}" height="{top_bar_h}" fill="rgba(255, 232, 0, {opacity})" />\n'
+            shapes_svg += f'<rect x="{x_offset + yellow_w}" y="{current_y}" width="{main_w}" height="{top_bar_h}" fill="{border_color_op}" />\n'
+
+            bottom_border_h = max(2, int(4 * scale))
+            shapes_svg += f'<rect x="{x_offset}" y="{current_y + box_h - bottom_border_h}" width="{box_w}" height="{bottom_border_h}" fill="rgba(0, 0, 0, {0.3 * opacity})" />\n'
+
         # Text
-        tx = x_offset + pad_x
-        # Using exact center of box layout with dominant-baseline for SVG
+        tx = x_offset + (box_w / 2) if "Center" in header_position else x_offset + pad_x
         ty = current_y + (box_h / 2)
-        if "4." in style: 
-            tx += int(20 * scale)
-            
-        text_color = f"rgba(255, 255, 255, {opacity})"
-        texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="bold" font-size="{font_size}px" fill="{text_color}" dominant-baseline="central" filter="url(#textShadow)">{dim["text"]}</text>\n'
+        
+        if "5." in style: 
+            tx = x_offset + (box_w / 2) 
+            ty += int(6 * scale) 
+            text_color = f"rgba(16, 16, 16, {opacity})"
+            texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="900" font-size="{font_size}px" fill="{text_color}" text-anchor="middle" dominant-baseline="central">{dim["text"]}</text>\n'
+        else:
+            if "Center" in header_position:
+                text_color = f"rgba(255, 255, 255, {opacity})"
+                texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="bold" font-size="{font_size}px" fill="{text_color}" text-anchor="middle" dominant-baseline="central" filter="url(#textShadow)">{dim["text"]}</text>\n'
+            else:
+                tx = x_offset + pad_x
+                text_color = f"rgba(255, 255, 255, {opacity})"
+                texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="bold" font-size="{font_size}px" fill="{text_color}" dominant-baseline="central" filter="url(#textShadow)">{dim["text"]}</text>\n'
         
         current_y += box_h + line_spacing
 

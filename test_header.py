@@ -4,8 +4,8 @@ try:
         "1. Neon Edge",
         "2. Glassmorphic Ribbon",
         "3. Floating Pill",
-        "4. Split-Grid Panel",
-        "5. Double Stroke Box"
+        "4. Single News Banner", 
+        "5. Multi-line News Banner"
     ]
     
     for i, style in enumerate(styles):
