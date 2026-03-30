@@ -109,7 +109,7 @@ def cleanup_temp_dir():
         shutil.rmtree(TEMP_DIR, ignore_errors=True)
     os.makedirs(TEMP_DIR, exist_ok=True)
 
-def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_opacity, header_text, header_position, header_opacity, header_scale, header_color, header_bg_color, header_style, header_animation, video_bg_volume, progress_bar, status_text):
+def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_opacity, logo_scale, header_text, header_position, header_opacity, header_scale, header_color, header_bg_color, header_style, header_animation, video_bg_volume, header_custom_svg, header_font, progress_bar, status_text):
     from video_engine import process_video_pipeline
     
     # 1. Save uploaded files to temp
@@ -155,6 +155,7 @@ def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_o
         logo_path=logo_path_str,
         logo_position=logo_position,
         logo_opacity=logo_opacity,
+        logo_scale=logo_scale,
         header_text=header_text,
         header_position=header_position,
         header_opacity=header_opacity,
@@ -164,6 +165,8 @@ def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_o
         header_style=header_style,
         header_animation=header_animation,
         video_bg_volume=video_bg_volume,
+        header_custom_svg=header_custom_svg,
+        header_font=header_font,
         progress_callback=progress_callback,
         status_callback=status_callback
     )
@@ -172,7 +175,7 @@ def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_o
     status_text.text("Done!")
 
 # Mockup function
-def render_unified_mockup(logo_file, logo_pos, logo_alpha, head_text, head_pos, head_alpha, head_scale, head_color, head_bg_color, head_style):
+def render_unified_mockup(logo_file, logo_pos, logo_alpha, logo_scale, head_text, head_pos, head_alpha, head_scale, head_color, head_bg_color, head_style, head_custom_svg, head_font):
     from PIL import Image, ImageDraw, ImageFont
     from PIL.Image import Resampling
     
@@ -206,6 +209,13 @@ def render_unified_mockup(logo_file, logo_pos, logo_alpha, head_text, head_pos, 
         logo_img = logo_img.resize((max_logo_w, new_h), Resampling.LANCZOS)
         lw, lh = logo_img.size
         
+    if logo_scale != 1.0:
+        new_w = int(lw * logo_scale)
+        new_h = int(lh * logo_scale)
+        if new_w > 0 and new_h > 0:
+            logo_img = logo_img.resize((new_w, new_h), Resampling.LANCZOS)
+            lw, lh = logo_img.size
+        
     if logo_alpha < 1.0:
         alpha = logo_img.split()[3]
         alpha = alpha.point(lambda p: int(p * logo_alpha))
@@ -238,7 +248,7 @@ def render_unified_mockup(logo_file, logo_pos, logo_alpha, head_text, head_pos, 
         # Scale for mockup is exactly 50% of the target 1080p scale.
         mockup_scale = head_scale * 0.5
         header_img = generate_dynamic_header_img(
-            head_text, mockup_scale, head_color, head_bg_color, head_alpha, head_style, head_pos
+            head_text, mockup_scale, head_color, head_bg_color, head_alpha, head_style, head_pos, head_custom_svg, head_font
         )
         
         # Position Header
@@ -269,7 +279,8 @@ def render_unified_mockup(logo_file, logo_pos, logo_alpha, head_text, head_pos, 
             elif "Lower-Middle" in head_pos: hy = int(H * 0.75) - (box_h // 2)
             else: hy = H - box_h - grid_margin
             
-        mockup.alpha_composite(header_img, (hx, hy))
+        # Use paste with itself as mask for alpha compositing (compatible with different sizes)
+        mockup.paste(header_img, (hx, hy), header_img)
 
     return mockup.convert("RGB")
 
@@ -348,6 +359,7 @@ with col_left:
             
         logo_position = f"XY:{logo_x},{logo_y}"
         logo_opacity = st.slider("Logo Opacity", min_value=0.0, max_value=1.0, value=0.25, step=0.05)
+        logo_scale = st.slider("Logo Scale (Size)", min_value=0.1, max_value=3.0, value=1.0, step=0.1)
 
     with st.expander("💬 Dynamic Header", expanded=True):
         col_hd_style, col_hd_anim = st.columns(2)
@@ -357,8 +369,19 @@ with col_left:
                 "2. Glassmorphic Ribbon", 
                 "3. The Floating Pill", 
                 "4. Single News Banner", 
-                "5. Multi-line News Banner"
+                "5. Multi-line News Banner",
+                "6. Custom SVG",
+                "7. Sharp Italic",
+                "8. Warning Arch"
             ], index=0)
+        
+        col_hd_font, col_hd_dummy = st.columns(2)
+        with col_hd_font:
+            header_font = st.selectbox("Font Family", ["Arial", "Impact", "Verdana", "Georgia", "Courier New", "Tahoma"], index=1) # Default Impact
+        
+        header_custom_svg = ""
+        if header_style == "6. Custom SVG":
+            header_custom_svg = st.text_area("Custom SVG Code", placeholder="Paste SVG elements here (no <svg> tag needed)...", height=150)
         with col_hd_anim:
             header_animation = st.selectbox("Intro/Outro Animation", [
                 "None",
@@ -426,8 +449,9 @@ with col_left:
             try:
                 generate_video(
                     ordered_images, uploaded_audio, uploaded_logo, logo_position,  
-                    logo_opacity, header_text, final_header_position, header_opacity, 
-                    header_scale, header_color, header_bg_color, header_style, header_animation, video_bg_volume, progress_bar, status_text
+                    logo_opacity, logo_scale, header_text, final_header_position, header_opacity, 
+                    header_scale, header_color, header_bg_color, header_style, header_animation, video_bg_volume, 
+                    header_custom_svg, header_font, progress_bar, status_text
                 )
                 
                 st.success("VIDEO GENERATED SUCCESSFULLY")
@@ -448,8 +472,8 @@ with col_left:
 # This column is targeted by the CSS above to be sticky on the right
 with col_right:
     preview_image = render_unified_mockup(
-        uploaded_logo, logo_position, logo_opacity, 
-        header_text, final_header_position, header_opacity, header_scale, header_color, header_bg_color, header_style
+        uploaded_logo, logo_position, logo_opacity, logo_scale,
+        header_text, final_header_position, header_opacity, header_scale, header_color, header_bg_color, header_style, header_custom_svg, header_font
     )
     
     st.markdown("<div class='preview-container'>", unsafe_allow_html=True)

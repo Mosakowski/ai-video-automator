@@ -1,4 +1,18 @@
 import os
+import sys
+
+# --- GTK3 Runtime Configuration for Windows (CairoSVG requirement) ---
+if sys.platform == 'win32':
+    gtk3_path = r'C:\Program Files\GTK3-Runtime Win64\bin'
+    if os.path.exists(gtk3_path):
+        os.environ['PATH'] = gtk3_path + os.pathsep + os.environ.get('PATH', '')
+        if hasattr(os, 'add_dll_directory'):
+            try:
+                os.add_dll_directory(gtk3_path)
+            except Exception:
+                pass
+# ---------------------------------------------------------------------
+
 from pathlib import Path
 import cv2
 import numpy as np
@@ -219,7 +233,7 @@ def make_animated_position(t, hx, hy, target_w, target_h, box_w, box_h, duration
     # STATIC
     return (int(hx), int(hy))
 
-def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, style, header_position):
+def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, style, header_position, custom_svg="", header_font="Arial"):
     from PIL import Image, ImageFont, ImageDraw 
     import cairosvg
     import io
@@ -230,14 +244,27 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
     lines = text.strip().split('\n')
     
     # Scale base metrics
-    pad_x = int(40 * scale)
+    pad_x = int(30 * scale)
+    if "7." in style:
+        pad_x = int(35 * scale) # Balanced padding for Sharp Italic
     pad_y = int(20 * scale)
     line_spacing = int(-10 * scale)
     font_size = int(75 * scale)
     
+    # Font mapping for Windows (Explicit paths for reliability)
+    font_map = {
+        "Arial": "C:/Windows/Fonts/arialbd.ttf",
+        "Impact": "C:/Windows/Fonts/impact.ttf",
+        "Verdana": "C:/Windows/Fonts/verdanab.ttf",
+        "Courier New": "C:/Windows/Fonts/courbd.ttf",
+        "Georgia": "C:/Windows/Fonts/georgiab.ttf",
+        "Tahoma": "C:/Windows/Fonts/tahomabd.ttf"
+    }
+    font_file = font_map.get(header_font, "arialbd.ttf")
+    
     # Text measurement using PIL 
     try:
-        font = ImageFont.truetype("arialbd.ttf", font_size)
+        font = ImageFont.truetype(font_file, font_size)
     except IOError:
         font = ImageFont.load_default()
         
@@ -247,7 +274,8 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
     total_h = 0
     
     for line in lines:
-        if not line.strip():
+        line = line.strip() # ENSURE NO TRAILING SPACES AFFECT WIDTH
+        if not line:
             tw, th = 0, font_size
         else:
             try:
@@ -266,13 +294,20 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
         
         if box_w > total_w: total_w = box_w
         total_h += box_h + line_spacing
-        
+
     total_h -= line_spacing
     
     if "4." in style:
         # Single News Banner dimensions
         total_w += int(140 * scale)
         total_h += int(20 * scale)
+    elif "8." in style:
+        # Warning Arch dimensions (exact padding to match user SVG)
+        # User SVG is 680 wide, 490 high. 
+        # Text is roughly 170 high, 450 wide.
+        # This implies roughly +230 width margin and +320 height margin.
+        total_w += int(200 * scale)
+        total_h += int(300 * scale)
         
     glow_radius = int(50 * scale)
     canvas_w = int(max(1, total_w + glow_radius * 2))
@@ -330,6 +365,71 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
     border_color_full = hex_to_rgb_str(color_hex, 1.0)
     border_color_op = hex_to_rgb_str(color_hex, opacity)
 
+    if "6. Custom SVG" in style and custom_svg.strip():
+        # In custom mode, we use the user-provided SVG elements
+        # We still normalize placeholders for the user
+        # --- MATH ENGINE SUPPORT ---
+        # Supports op-add(variable, value) and op-sub(variable, value)
+        import re
+        
+        def math_callback(match):
+            op = match.group(1)
+            var_name = match.group(2)
+            value = float(match.group(3))
+            
+            # Map variable names to their numeric values
+            var_map = {
+                "x_offset": float(glow_radius),
+                "current_y": float(glow_radius),
+                "box_w": float(total_w),
+                "box_h": float(total_h),
+                "font_size": float(font_size),
+                "scale": float(scale)
+            }
+            
+            base_val = var_map.get(var_name, 0.0)
+            if op == "add":
+                return str(base_val + value)
+            else:
+                return str(base_val - value)
+                
+        # Regex to find op-add({var}, val) or op-add(var, val)
+        math_regex = r"op-(add|sub)\(\{?([a-zA-Z_]+)\}?,\s*([\d.]+)\)"
+        normalized_svg = re.sub(math_regex, math_callback, custom_svg)
+        
+        # Now do the simple replacements
+        normalized_svg = normalized_svg.replace("{color_hex}", color_hex) \
+                                   .replace("{bg_color_hex}", bg_color_hex) \
+                                   .replace("{opacity}", str(opacity)) \
+                                   .replace("{text}", text) \
+                                   .replace("{font_size}", str(font_size)) \
+                                   .replace("{x_offset}", str(glow_radius)) \
+                                   .replace("{current_y}", str(glow_radius)) \
+                                   .replace("{box_w}", str(total_w)) \
+                                   .replace("{box_h}", str(total_h)) \
+                                   .replace("{header_font}", header_font)
+        
+        # Calculate text position for convenience if they want to use {tx} and {ty}
+        # Assuming centered text for simplicity in custom mode if not specified
+        tx = glow_radius + (total_w / 2)
+        ty = glow_radius + (total_h / 2)
+        
+        normalized_svg = normalized_svg.replace("{tx}", str(tx)).replace("{ty}", str(ty))
+        
+        shapes_svg += normalized_svg
+        
+        # We skip the rest of the loop logic for custom SVG since it replaces the entire internal shapesLayer
+        svg += "</defs>\n"
+        svg += f"<g id='customLayer'>{shapes_svg}</g>\n"
+        svg += "</svg>"
+        
+        try:
+            png_data = cairosvg.svg2png(bytestring=svg.encode('utf-8'))
+            return Image.open(io.BytesIO(png_data))
+        except Exception as e:
+            print(f"CairoSVG Custom Render Error: {e}")
+            return Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
+
     if "4." in style: # Single News Banner (Global Background)
         single_box_w = total_w
         single_box_h = total_h
@@ -355,6 +455,85 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
         # Push the starting Y for text down a bit to account for the top bar and overall padding
         current_y += int(10 * scale)
 
+    elif "8." in style: # Warning Arch (Exact User SVG adaptation)
+        arch_w = total_w
+        # User base heights to adapt
+        # The main arch vertical part starts at 36, ends at 382. (Height = 346)
+        # Assuming text takes `total_h - 300` (since we added 300 margin),
+        # let's map exactly to user's SVG proportions dynamically.
+        text_zone_h = total_h - int(300 * scale)
+        
+        # We start with the dark background
+        bg_w = arch_w
+        # Top margin before the red arch
+        top_offset = int(36 * scale)
+        # Height of the straight red arch part
+        arch_base_h = top_offset + text_zone_h + int(140 * scale)
+        # Depth of the bezier sweep bottom
+        sweep_depth = int(88 * scale)
+        # Total dark background height covers up to 490 in user SVG.
+        # So 490 - (382 straight part bottom) = 108.
+        bg_h = arch_base_h + int(108 * scale)
+        
+        arch_x = glow_radius # our 0 coordinate
+
+        # 1. Dark background
+        shapes_svg += f'<rect x="{arch_x}" y="{current_y}" width="{bg_w}" height="{bg_h}" fill="#111" />\n'
+        
+        # 2. Hazard Stripes
+        stripe_color = hex_to_rgb_str(color_hex, opacity)
+        if "#" not in stripe_color and not stripe_color.startswith("rgb"):
+            # fallback if color is solid and missing
+            stripe_color = "#F04820"
+            
+        svg += f'''
+        <pattern id="ws8" patternUnits="userSpaceOnUse" width="40" height="40" patternTransform="rotate(45)">
+            <rect width="20" height="40" fill="rgba(20,20,20,0.88)"/>
+            <rect x="20" width="20" height="40" fill="{stripe_color}"/>
+        </pattern>
+        '''
+        
+        # Stripes are placed at y=436 relative to 0 in user's layout.
+        # 436 = 382 (arch base object) + 54.
+        stripe_y = current_y + arch_base_h + int(54 * scale)
+        stripe_margin = int(28 * scale)
+        stripe_w = bg_w - stripe_margin * 2
+        stripe_h = int(32 * scale)
+        shapes_svg += f'<rect x="{arch_x + stripe_margin}" y="{stripe_y}" width="{stripe_w}" height="{stripe_h}" fill="url(#ws8)" />\n'
+        
+        # 3. Main Arch (Red Swoop)
+        bg_color_op = hex_to_rgb_str(bg_color_hex, opacity)
+        path_y_top = current_y + top_offset
+        path_y_bot = current_y + arch_base_h
+        swoop_y = path_y_bot + sweep_depth
+        
+        path_d = f"M {arch_x},{path_y_top} " \
+                 f"L {arch_x + bg_w},{path_y_top} " \
+                 f"L {arch_x + bg_w},{path_y_bot} " \
+                 f"Q {arch_x + bg_w / 2},{swoop_y} {arch_x},{path_y_bot} Z"
+        shapes_svg += f'<path d="{path_d}" fill="{bg_color_op}" />\n'
+        
+        # 4. Logo Circle and Geometric F
+        logo_cx = arch_x + bg_w / 2
+        logo_cy = path_y_top
+        logo_r = int(34 * scale)
+        shapes_svg += f'<circle cx="{logo_cx}" cy="{logo_cy}" r="{logo_r}" fill="black" />\n'
+        
+        f_scale = scale * 1.0
+        shapes_svg += f'''
+        <g transform="translate({logo_cx},{logo_cy}) rotate(10) scale({f_scale})">
+            <rect x="-16" y="-17" width="32" height="9" rx="1" fill="white"/>
+            <rect x="-16" y="-17" width="9" height="34" rx="1" fill="white"/>
+            <rect x="-16" y="-4" width="24" height="9" rx="1" fill="white"/>
+        </g>
+        '''
+        
+        # Shift current_y down so text drawing starts exactly at y=140 relative to 0. (140 * scale)
+        current_y += int((140 - top_offset / scale) * scale) + top_offset
+
+
+
+
     for i, dim in enumerate(line_dims):
         if "Left" in header_position:
             x_offset = glow_radius
@@ -368,14 +547,22 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
         if box_w <= 0 or box_h <= 0:
             continue
             
-        # Draw text only for Style 4 (It has global box)
-        if "4." in style: 
-            # Center text within the single box
-            tx = glow_radius + (total_w / 2) if "Center" in header_position else glow_radius + pad_x + int(20 * scale)
-            ty = current_y + (box_h / 2) + int(6 * scale) 
-            text_color = f"rgba(16, 16, 16, {opacity})"
-            anchor = 'text-anchor="middle"' if "Center" in header_position else ''
-            texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="900" font-size="{font_size}px" fill="{text_color}" {anchor} dominant-baseline="central">{dim["text"]}</text>\n'
+        # Draw text only for Style 4 or 8 (They have global box)
+        if "4." in style or "8." in style: 
+            if "8." in style:
+                tx = glow_radius + (total_w / 2) # Force center
+                ty = current_y + (box_h / 2) + int(6 * scale) 
+                text_color = f"rgba(255, 255, 255, {opacity})"
+                anchor = 'text-anchor="middle"'
+                texts_svg += f'<text x="{tx}" y="{ty}" font-family="{header_font}, sans-serif" font-weight="bold" font-size="{font_size}px" fill="{text_color}" {anchor} dominant-baseline="central">{dim["text"]}</text>\n'
+            else:
+                # Style 4
+                tx = glow_radius + (total_w / 2) if "Center" in header_position else glow_radius + pad_x + int(20 * scale)
+                ty = current_y + (box_h / 2) + int(6 * scale) 
+                text_color = f"rgba(16, 16, 16, {opacity})"
+                anchor = 'text-anchor="middle"' if "Center" in header_position else ''
+                texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="900" font-size="{font_size}px" fill="{text_color}" {anchor} dominant-baseline="central">{dim["text"]}</text>\n'
+                
             current_y += box_h + line_spacing
             continue
 
@@ -403,7 +590,7 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
             </linearGradient>
             '''
             
-        if "5." not in style:
+        if "5." not in style and "7." not in style:
             shapes_svg += f'<rect x="{x_offset}" y="{current_y}" width="{box_w}" height="{box_h}" rx="{radius}" ry="{radius}" fill="url(#{grad_id})" />\n'
         
         if "1." in style: # Neon Edge
@@ -443,23 +630,42 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
             bottom_border_h = max(2, int(4 * scale))
             shapes_svg += f'<rect x="{x_offset}" y="{current_y + box_h - bottom_border_h}" width="{box_w}" height="{bottom_border_h}" fill="rgba(0, 0, 0, {0.3 * opacity})" />\n'
 
+        elif "7." in style: # Sharp Italic (Parallelogram)
+            # A skewed rectangle (parallelogram)
+            # Skew effect: shift top right, bottom left
+            skew = int(25 * scale)
+            x1, y1 = x_offset, current_y
+            x2, y2 = x_offset + box_w, current_y + box_h
+            
+            p1 = f"{x1 + skew},{y1}" # Top Left
+            p2 = f"{x2 + skew},{y1}" # Top Right
+            p3 = f"{x2 - skew},{y2}" # Bottom Right
+            p4 = f"{x1 - skew},{y2}" # Bottom Left
+            
+            # Use the user's selected background color instead of hardcoded black
+            bg_color_op = hex_to_rgb_str(bg_color_hex, opacity)
+            shapes_svg += f'<polygon points="{p1} {p2} {p3} {p4}" fill="{bg_color_op}" opacity="1.0" stroke="none" />\n'
+
         # Text
         tx = x_offset + (box_w / 2) if "Center" in header_position else x_offset + pad_x
         ty = current_y + (box_h / 2)
+        
+        # Avoid double-bolding Impact
+        weight = "bold" if header_font != "Impact" else "normal"
         
         if "5." in style: 
             tx = x_offset + (box_w / 2) 
             ty += int(6 * scale) 
             text_color = f"rgba(16, 16, 16, {opacity})"
-            texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="900" font-size="{font_size}px" fill="{text_color}" text-anchor="middle" dominant-baseline="central">{dim["text"]}</text>\n'
+            texts_svg += f'<text x="{tx}" y="{ty}" font-family="{header_font}, sans-serif" font-weight="{weight}" font-size="{font_size}px" fill="{text_color}" text-anchor="middle" dominant-baseline="central">{dim["text"]}</text>\n'
         else:
             if "Center" in header_position:
                 text_color = f"rgba(255, 255, 255, {opacity})"
-                texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="bold" font-size="{font_size}px" fill="{text_color}" text-anchor="middle" dominant-baseline="central" filter="url(#textShadow)">{dim["text"]}</text>\n'
+                texts_svg += f'<text x="{tx}" y="{ty}" font-family="{header_font}, sans-serif" font-weight="{weight}" font-size="{font_size}px" fill="{text_color}" text-anchor="middle" dominant-baseline="central" filter="url(#textShadow)">{dim["text"]}</text>\n'
             else:
                 tx = x_offset + pad_x
                 text_color = f"rgba(255, 255, 255, {opacity})"
-                texts_svg += f'<text x="{tx}" y="{ty}" font-family="Arial, sans-serif" font-weight="bold" font-size="{font_size}px" fill="{text_color}" dominant-baseline="central" filter="url(#textShadow)">{dim["text"]}</text>\n'
+                texts_svg += f'<text x="{tx}" y="{ty}" font-family="{header_font}, sans-serif" font-weight="{weight}" font-size="{font_size}px" fill="{text_color}" dominant-baseline="central" filter="url(#textShadow)">{dim["text"]}</text>\n'
         
         current_y += box_h + line_spacing
 
@@ -481,7 +687,7 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
         # Fallback to empty image on error
         return Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
 
-def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None, logo_position="Bottom-Right", logo_opacity=0.8, header_text="", header_position="Freestyle", header_opacity=0.9, header_scale=1.0, header_color="#FF6E00", header_bg_color="#000000", header_style="1. Neon Edge", header_animation="None", video_bg_volume=0.15, progress_callback=None, status_callback=None):
+def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None, logo_position="Bottom-Right", logo_opacity=0.8, logo_scale=1.0, header_text="", header_position="Freestyle", header_opacity=0.9, header_scale=1.0, header_color="#FF6E00", header_bg_color="#000000", header_style="1. Neon Edge", header_animation="None", video_bg_volume=0.15, header_custom_svg="", header_font="Arial", progress_callback=None, status_callback=None):
     """
     Main function to process the images and audio into a final video.
     Supports a 4x3 grid / 5x5 grid logo, and automatic dynamic text headers generated with PIL.
@@ -702,6 +908,17 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
                     pass # If FX fails, we proceed with original size
                 
             lw, lh = logo_clip.size
+            
+            if logo_scale != 1.0:
+                try:
+                    from moviepy.video.fx.Resize import Resize
+                    new_w = int(lw * logo_scale)
+                    if new_w > 0:
+                        logo_clip = logo_clip.with_effects([Resize(width=new_w)])
+                        lw, lh = logo_clip.size
+                except Exception:
+                    pass
+                    
             padding = 40
         
             # Compute exact position based on XY coordinates from sliders
@@ -727,7 +944,7 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
             # 1. Generate Header Plate leveraging our new styling function
             header_img = generate_dynamic_header_img(
                 header_text, header_scale, header_color, header_bg_color,
-                header_opacity, header_style, header_position
+                header_opacity, header_style, header_position, header_custom_svg, header_font
             )
             
             canvas_w, canvas_h = header_img.size
