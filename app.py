@@ -334,7 +334,7 @@ with col_left:
     with st.expander("💧 Watermark Logo", expanded=False):
         watermark_option = st.radio(
             "Watermark Source",
-            ["None", "Ciekawostki", "Info24", "Custom Upload"],
+            ["None", "Ciekawostki", "Info24", "FactReactor", "Custom Upload"],
             horizontal=True
         )
         
@@ -343,6 +343,8 @@ with col_left:
             uploaded_logo = str(Path("assets/watermarks/watermark_ciekawostki.png").absolute())
         elif watermark_option == "Info24":
             uploaded_logo = str(Path("assets/watermarks/watermark_info24.png").absolute())
+        elif watermark_option == "FactReactor":
+            uploaded_logo = str(Path("assets/watermarks/watermark_factreactor.png").absolute())
         elif watermark_option == "Custom Upload":
             uploaded_logo = st.file_uploader(
                 "Upload Logo (PNG)", 
