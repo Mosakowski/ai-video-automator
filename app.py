@@ -3,6 +3,12 @@ import os
 import shutil
 from pathlib import Path
 from streamlit_sortables import sort_items
+from positioning_resolver import resolve_header_top_left
+
+try:
+    import pillow_avif
+except ImportError:
+    pass
 
 # --- Configuration & Setup ---
 st.set_page_config(page_title="AI Video Automator", page_icon="🎥", layout="wide")
@@ -247,37 +253,22 @@ def render_unified_mockup(logo_file, logo_pos, logo_alpha, logo_scale, head_text
         
         # Scale for mockup is exactly 50% of the target 1080p scale.
         mockup_scale = head_scale * 0.5
-        header_img = generate_dynamic_header_img(
-            head_text, mockup_scale, head_color, head_bg_color, head_alpha, head_style, head_pos, head_custom_svg, head_font
+        header_img, header_meta = generate_dynamic_header_img(
+            head_text, mockup_scale, head_color, head_bg_color, head_alpha, head_style, head_pos, head_custom_svg, head_font,
+            return_meta=True
         )
         
         # Position Header
-        canvas_w, canvas_h = header_img.size
-        box_w, box_h = canvas_w, canvas_h
-        hx, hy = 0, 0
-        if head_pos.startswith("XY:"):
-            # Freestyle Coordinates from Sliders (Scaled back to 540x960)
-            coords = head_pos.replace("XY:", "").split(",")
-            hx = int(int(coords[0]) * (W / 1080))
-            hy = int(int(coords[1]) * (H / 1920))
-        else:
-            # 5x5 Grid math (Scaled from engine)
-            grid_margin = 30 # 60 * 0.5
-            
-            if "Left" in head_pos:
-                if "Center-" in head_pos: hx = int(W * 0.25) - (box_w // 2)
-                else: hx = grid_margin
-            elif "Right" in head_pos:
-                if "Center-" in head_pos: hx = int(W * 0.75) - (box_w // 2)
-                else: hx = W - box_w - grid_margin
-            else:
-                hx = (W - box_w) // 2
-                
-            if "Top" in head_pos: hy = grid_margin
-            elif "Upper-Middle" in head_pos: hy = int(H * 0.25) - (box_h // 2)
-            elif "Center" in head_pos and "Left" not in head_pos and "Right" not in head_pos: hy = int(H * 0.5) - (box_h // 2)
-            elif "Lower-Middle" in head_pos: hy = int(H * 0.75) - (box_h // 2)
-            else: hy = H - box_h - grid_margin
+        canvas_w, canvas_h = header_meta["canvas_size"]
+        visual_bbox = header_meta["visual_bbox"]
+        hx, hy = resolve_header_top_left(
+            position_spec=head_pos,
+            target_size=(W, H),
+            canvas_size=(canvas_w, canvas_h),
+            visual_bbox=visual_bbox,
+            grid_margin=30,
+            xy_scale=(W / 1080.0, H / 1920.0),
+        )
             
         # Use paste with itself as mask for alpha compositing (compatible with different sizes)
         mockup.paste(header_img, (hx, hy), header_img)
@@ -294,7 +285,7 @@ with col_left:
     st.markdown("<div class='section-header'>Upload Assets</div>", unsafe_allow_html=True)
     uploaded_images = st.file_uploader(
         "Upload Media (Images & Videos)", 
-        type=["jpg", "jpeg", "png", "mp4", "mov"], 
+        type=["jpg", "jpeg", "png", "webp", "avif", "mp4", "mov"], 
         accept_multiple_files=True
     )
 
@@ -347,8 +338,8 @@ with col_left:
             uploaded_logo = str(Path("assets/watermarks/watermark_factreactor.png").absolute())
         elif watermark_option == "Custom Upload":
             uploaded_logo = st.file_uploader(
-                "Upload Logo (PNG)", 
-                type=["png"], 
+                "Upload Logo (PNG/WEBP/AVIF)", 
+                type=["png", "webp", "avif"], 
                 accept_multiple_files=False
             )
 
@@ -405,38 +396,32 @@ with col_left:
         with col_hd_sc:
             header_scale = st.slider("Scale (Size)", min_value=0.5, max_value=2.0, value=0.7, step=0.1, key="header_scale_slider")
 
-        st.write("Position Coordinates (X, Y):")
-        col_hd_x, col_hd_center, col_hd_y = st.columns([2, 1, 2])
-        with col_hd_x:
-            header_x = st.slider("X (px) ", 0, 1080, 65, key="hx")
-        with col_hd_center:
-            st.write("") # spacer for alignment
-            def _center_x():
-                # Measure the header width to compute true center
-                from PIL import Image, ImageDraw, ImageFont
-                _scale = st.session_state.get("header_scale_slider", 0.7)
-                _text = st.session_state.get("header_text_area", "")
-                _font_size = int(75 * _scale)
-                _pad_x = int(40 * _scale)
-                try:
-                    _font = ImageFont.truetype("arialbd.ttf", _font_size)
-                except IOError:
-                    _font = ImageFont.load_default()
-                _dd = ImageDraw.Draw(Image.new('RGBA', (1,1)))
-                _max_w = 0
-                for _line in _text.strip().split('\n'):
-                    if _line.strip():
-                        try:
-                            l, t, r, b = _dd.textbbox((0,0), _line, font=_font)
-                            _max_w = max(_max_w, r - l)
-                        except:
-                            _max_w = max(_max_w, len(_line) * int(35 * _scale))
-                _box_w = _max_w + _pad_x * 2 + int(50 * _scale) * 2  # include glow_radius
-                st.session_state["hx"] = max(0, (1080 - _box_w) // 2)
-            st.button("Center X", key="center_x", on_click=_center_x)
-        with col_hd_y:
-            header_y = st.slider("Y (px) ", 0, 1920, 1300, key="hy")
-        final_header_position = f"XY:{header_x},{header_y}"
+        position_mode = st.radio(
+            "Header Position Mode",
+            ["Grid", "Custom (XY)"],
+            horizontal=True,
+            key="header_position_mode"
+        )
+
+        grid_positions = [
+            "Top-Left", "Top-Center", "Top-Right",
+            "Upper-Middle-Left", "Upper-Middle-Center", "Upper-Middle-Right",
+            "Center-Left", "Center", "Center-Right",
+            "Lower-Middle-Left", "Lower-Middle-Center", "Lower-Middle-Right",
+            "Bottom-Left", "Bottom-Center", "Bottom-Right",
+        ]
+
+        if position_mode == "Grid":
+            selected_grid = st.selectbox("Grid Position", grid_positions, index=7)
+            final_header_position = f"GRID:{selected_grid}"
+        else:
+            st.write("Position Coordinates (X, Y):")
+            col_hd_x, col_hd_y = st.columns(2)
+            with col_hd_x:
+                header_x = st.slider("X (px)", 0, 1080, 65, key="hx")
+            with col_hd_y:
+                header_y = st.slider("Y (px)", 0, 1920, 1300, key="hy")
+            final_header_position = f"XY:{header_x},{header_y}"
 
     st.markdown("<div class='section-header'>Action</div>", unsafe_allow_html=True)
     if st.button("Generate Video", type="primary"):

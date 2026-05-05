@@ -19,6 +19,7 @@ import numpy as np
 from ultralytics import YOLO
 from moviepy import ImageClip, AudioFileClip, concatenate_videoclips, CompositeVideoClip, VideoClip
 from moviepy.video.fx.CrossFadeIn import CrossFadeIn
+from positioning_resolver import extract_visual_bbox_from_rgba, resolve_header_top_left
 
 # Initialize YOLO model globally so it's only loaded once
 model = YOLO('yolov8n.pt')
@@ -233,13 +234,25 @@ def make_animated_position(t, hx, hy, target_w, target_h, box_w, box_h, duration
     # STATIC
     return (int(hx), int(hy))
 
-def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, style, header_position, custom_svg="", header_font="Arial"):
+def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, style, header_position, custom_svg="", header_font="Arial", return_meta=False):
     from PIL import Image, ImageFont, ImageDraw 
     import cairosvg
     import io
 
+    def _finalize_return(pil_img):
+        if not return_meta:
+            return pil_img
+
+        rgba = np.array(pil_img.convert("RGBA"))
+        visual_bbox = extract_visual_bbox_from_rgba(rgba)
+        meta = {
+            "canvas_size": pil_img.size,
+            "visual_bbox": visual_bbox,
+        }
+        return pil_img, meta
+
     if not text.strip():
-        return Image.new('RGBA', (1,1), (0,0,0,0))
+        return _finalize_return(Image.new('RGBA', (1,1), (0,0,0,0)))
     
     lines = text.strip().split('\n')
     
@@ -425,10 +438,11 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
         
         try:
             png_data = cairosvg.svg2png(bytestring=svg.encode('utf-8'))
-            return Image.open(io.BytesIO(png_data))
+            rendered = Image.open(io.BytesIO(png_data)).convert("RGBA")
+            return _finalize_return(rendered)
         except Exception as e:
             print(f"CairoSVG Custom Render Error: {e}")
-            return Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
+            return _finalize_return(Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0)))
 
     if "4." in style: # Single News Banner (Global Background)
         single_box_w = total_w
@@ -681,11 +695,12 @@ def generate_dynamic_header_img(text, scale, color_hex, bg_color_hex, opacity, s
 
     try:
         png_data = cairosvg.svg2png(bytestring=svg.encode('utf-8'))
-        return Image.open(io.BytesIO(png_data))
+        rendered = Image.open(io.BytesIO(png_data)).convert("RGBA")
+        return _finalize_return(rendered)
     except Exception as e:
         print(f"CairoSVG Render Error: {e}")
         # Fallback to empty image on error
-        return Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0))
+        return _finalize_return(Image.new('RGBA', (canvas_w, canvas_h), (0,0,0,0)))
 
 def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None, logo_position="Bottom-Right", logo_opacity=0.8, logo_scale=1.0, header_text="", header_position="Freestyle", header_opacity=0.9, header_scale=1.0, header_color="#FF6E00", header_bg_color="#000000", header_style="1. Neon Edge", header_animation="None", video_bg_volume=0.15, header_custom_svg="", header_font="Arial", progress_callback=None, status_callback=None):
     """
@@ -942,52 +957,32 @@ def process_video_pipeline(image_paths, audio_path, output_path, logo_path=None,
             if status_callback: status_callback("Generating Dynamic Header...")
             
             # 1. Generate Header Plate leveraging our new styling function
-            header_img = generate_dynamic_header_img(
+            header_img, header_meta = generate_dynamic_header_img(
                 header_text, header_scale, header_color, header_bg_color,
-                header_opacity, header_style, header_position, header_custom_svg, header_font
+                header_opacity, header_style, header_position, header_custom_svg, header_font,
+                return_meta=True
             )
             
-            canvas_w, canvas_h = header_img.size
+            canvas_w, canvas_h = header_meta["canvas_size"]
+            visual_bbox = header_meta["visual_bbox"]
             
             header_np = np.array(header_img)
             header_clip = ImageClip(header_np)
         
-            # 2. Position Header
-            # Decode position
-            
-            # box size used for grid logic AND animation
-            box_w, box_h = canvas_w, canvas_h
-            
-            if header_position.startswith("XY:"):
-                # Freestyle Canvas Position
-                coords = header_position.replace("XY:", "").split(",")
-                hx, hy = int(coords[0]), int(coords[1])
-            else:
-                # 3x3 Grid Mode
-                hx, hy = 0, 0
-                grid_margin = 60
-            
-                if "Left" in header_position:
-                    if "Center-" in header_position: hx = int(target_w * 0.25) - (box_w // 2)
-                    else: hx = grid_margin
-                elif "Right" in header_position:
-                    if "Center-" in header_position: hx = int(target_w * 0.75) - (box_w // 2)
-                    else: hx = target_w - box_w - grid_margin
-                else: # Center horizontally
-                    hx = (target_w - box_w) // 2
-                
-                if "Top" in header_position: hy = grid_margin
-                elif "Upper-Middle" in header_position: hy = int(target_h * 0.25) - (box_h // 2)
-                elif "Center" in header_position and "Left" not in header_position and "Right" not in header_position: 
-                    hy = int(target_h * 0.5) - (box_h // 2) # True center vertical
-                elif "Lower-Middle" in header_position: hy = int(target_h * 0.75) - (box_h // 2)
-                else: hy = target_h - box_h - grid_margin
+            hx, hy = resolve_header_top_left(
+                position_spec=header_position,
+                target_size=(target_w, target_h),
+                canvas_size=(canvas_w, canvas_h),
+                visual_bbox=visual_bbox,
+                grid_margin=60,
+                xy_scale=(1.0, 1.0),
+            )
             
             # Evaluate header animation
             if header_animation != "None":
                 def pos_func(t):
                     return make_animated_position(
-                        t, hx, hy, target_w, target_h, box_w, box_h, final_video.duration, header_animation
+                        t, hx, hy, target_w, target_h, canvas_w, canvas_h, final_video.duration, header_animation
                     )
                 header_clip = header_clip.with_position(pos_func).with_duration(final_video.duration)
             else:
