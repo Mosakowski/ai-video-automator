@@ -4,6 +4,10 @@ import shutil
 from pathlib import Path
 from streamlit_sortables import sort_items
 from positioning_resolver import resolve_header_top_left
+import base64
+from io import BytesIO
+from PIL import Image
+import cv2
 
 try:
     import pillow_avif
@@ -103,10 +107,111 @@ st.markdown("""
         margin-top: 8px;
     }
     
+    /* ===== TIMELINE CARDS ===== */
+    .media-card {
+        background: #262626;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 8px;
+        margin-bottom: 8px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+    }
+    .media-thumb {
+        width: 60px;
+        height: 60px;
+        border-radius: 4px;
+        object-fit: cover;
+        background: #111;
+    }
+    .media-info {
+        flex-grow: 1;
+    }
+    .media-name {
+        font-size: 0.85rem;
+        font-weight: 500;
+        color: #eee;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        max-width: 200px;
+    }
+    .media-type {
+        font-size: 0.7rem;
+        color: #777;
+        text-transform: uppercase;
+    }
+    
+    /* ===== SORTABLE LIST CUSTOMIZATION ===== */
+    /* Target the sortable list items if possible, otherwise we style the container */
+    .sortable-container {
+        max-width: 400px;
+        margin-bottom: 2rem;
+    }
+    
+    /* ===== HORIZONTAL FILMSTRIP ===== */
+    .filmstrip-container {
+        display: flex;
+        overflow-x: auto;
+        gap: 12px;
+        padding: 10px 0;
+        scroll-behavior: smooth;
+        scrollbar-width: thin;
+        scrollbar-color: #444 #1a1a1a;
+    }
+    .filmstrip-item {
+        flex: 0 0 120px;
+        background: #222;
+        border: 1px solid #333;
+        border-radius: 8px;
+        padding: 6px;
+        text-align: center;
+        transition: all 0.2s;
+        position: relative;
+    }
+    .filmstrip-item:hover {
+        border-color: #FF6E00;
+        background: #2a2a2a;
+    }
+    .filmstrip-thumb {
+        width: 100%;
+        height: 160px;
+        object-fit: cover;
+        border-radius: 5px;
+        margin-bottom: 6px;
+    }
+    .filmstrip-label {
+        font-size: 0.7rem;
+        font-weight: 500;
+        color: #bbb;
+        white-space: nowrap;
+        overflow: hidden;
+        text-overflow: ellipsis;
+    }
+    .filmstrip-index {
+        position: absolute;
+        top: -6px;
+        left: -6px;
+        background: #FF6E00;
+        color: white;
+        font-size: 0.65rem;
+        font-weight: 900;
+        width: 22px;
+        height: 22px;
+        display: flex;
+        align-items: center;
+        justify-content: center;
+        border-radius: 50%;
+        z-index: 10;
+        box-shadow: 0 2px 5px rgba(0,0,0,0.5);
+    }
+    
     </style>
 """, unsafe_allow_html=True)
 
 TEMP_DIR = Path("temp")
+TEMP_DIR.mkdir(exist_ok=True)
 OUTPUT_FILE = "output.mp4"
 
 def cleanup_temp_dir():
@@ -179,6 +284,51 @@ def generate_video(image_files, audio_file, uploaded_logo, logo_position, logo_o
     
     progress_bar.progress(100)
     status_text.text("Done!")
+
+def get_thumbnail(file):
+    """Generates a base64 encoded thumbnail for an image or video."""
+    if file.name in st.session_state.get('thumbnails', {}):
+        return st.session_state['thumbnails'][file.name]
+    
+    try:
+        if file.type.startswith('image'):
+            img = Image.open(file)
+            img.thumbnail((200, 200))
+            buffered = BytesIO()
+            img.save(buffered, format="JPEG")
+            encoded = base64.b64encode(buffered.getvalue()).decode()
+            thumb = f"data:image/jpeg;base64,{encoded}"
+        elif file.type.startswith('video'):
+            # Save temp file to read with cv2
+            t_path = TEMP_DIR / f"thumb_tmp_{file.name}"
+            with open(t_path, "wb") as f:
+                f.write(file.getvalue())
+            
+            cap = cv2.VideoCapture(str(t_path))
+            ret, frame = cap.read()
+            cap.release()
+            os.remove(t_path)
+            
+            if ret:
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+                img = Image.fromarray(frame)
+                img.thumbnail((200, 200))
+                buffered = BytesIO()
+                img.save(buffered, format="JPEG")
+                encoded = base64.b64encode(buffered.getvalue()).decode()
+                thumb = f"data:image/jpeg;base64,{encoded}"
+            else:
+                thumb = None
+        else:
+            thumb = None
+    except Exception as e:
+        print(f"Error generating thumbnail for {file.name}: {e}")
+        thumb = None
+    
+    if 'thumbnails' not in st.session_state:
+        st.session_state['thumbnails'] = {}
+    st.session_state['thumbnails'][file.name] = thumb
+    return thumb
 
 # Mockup function
 def render_unified_mockup(logo_file, logo_pos, logo_alpha, logo_scale, head_text, head_pos, head_alpha, head_scale, head_color, head_bg_color, head_style, head_custom_svg, head_font):
@@ -302,18 +452,53 @@ with col_left:
         # Create a mapping of filename -> UploadedFile object
         file_map = {img.name: img for img in uploaded_images}
         
-        # Determine current order or fall back to original upload order
-        original_names = list(file_map.keys())
+        # Shorten names for the sortable list items
+        def shorten_name(name, length=20):
+            if len(name) <= length: return name
+            ext = name.split('.')[-1]
+            return name[:length-5] + "..." + ext
+
+        # Prepare items for sort_items
+        # We'll use "Index + Short Name" for the sortable bars to keep them clean
+        original_labels = [f"{idx+1}. {shorten_name(img.name)}" for idx, img in enumerate(uploaded_images)]
+        # Map labels back to full names
+        label_to_fullname = {f"{idx+1}. {shorten_name(img.name)}": img.name for idx, img in enumerate(uploaded_images)}
         
-        # Display the draggable sortable list
-        st.write("Drag and drop to rearrange the order in which media will appear in the video:")
-        sorted_names = sort_items(original_names)
+        st.write("Rearrange the clips:")
         
-        # If sort_items returns something, build the sorted list. Otherwise fallback to original.
-        if sorted_names:
-            ordered_images = [file_map[name] for name in sorted_names]
+        with st.container():
+            st.markdown("<div class='sortable-container'>", unsafe_allow_html=True)
+            sorted_labels = sort_items(original_labels, direction="vertical")
+            st.markdown("</div>", unsafe_allow_html=True)
+        
+        if sorted_labels:
+            ordered_images = [file_map[label_to_fullname[label]] for label in sorted_labels]
         else:
             ordered_images = uploaded_images
+            
+        # Display Visual Timeline (Filmstrip)
+        st.markdown("### 🎞️ Visual Timeline")
+        
+        # IMPORTANT: Remove leading spaces in the HTML string to prevent markdown from treating it as a code block
+        filmstrip_html = "<div class='filmstrip-container'>"
+        for idx, img in enumerate(ordered_images):
+            thumb = get_thumbnail(img)
+            name = shorten_name(img.name, 15)
+            
+            thumb_tag = f"<img src='{thumb}' class='filmstrip-thumb'>" if thumb else "<div class='filmstrip-thumb' style='display:flex;align-items:center;justify-content:center;background:#111;font-size:0.5rem;'>NO THUMB</div>"
+            
+            # Construct HTML without leading spaces for each line
+            item_html = "<div class='filmstrip-item'>"
+            item_html += f"<div class='filmstrip-index'>{idx+1}</div>"
+            item_html += thumb_tag
+            item_html += f"<div class='filmstrip-label'>{name}</div>"
+            item_html += "</div>"
+            filmstrip_html += item_html
+            
+        filmstrip_html += "</div>"
+        st.markdown(filmstrip_html, unsafe_allow_html=True)
+        
+        st.caption("Dragging items above updates this timeline automatically.")
     else:
         st.info("Upload media above to set their order.")
     
